@@ -18,3 +18,6 @@
 - **re_cercle/main.rb** — Fix : algorithme de détection par circumcircle (essai de tous les voisins, pas seulement le premier)
 - **re_cercle/main.rb** — Fix : tolérance de coplanarité normalisée (dot product / longueur du vecteur) pour supporter les grands cercles (r>300). Tolérance de distance rendue proportionnelle au rayon.
 - **re_cercle/main.rb** — Retrait de tous les puts de debug
+- **FSD.md** — Création de la spécification fonctionnelle
+- **`.claude/skills/sketchup-plugin/SKILL.md`** — Création du skill persistant avec sections FSD et Livraison
+- **`~/.claude/CLAUDE.md`** — Ajout de la section FSD obligatoire pour tous les projets
