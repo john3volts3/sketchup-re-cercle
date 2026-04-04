@@ -14,7 +14,6 @@ module ReCercle
 
     # Collecter tous les edges de la sélection (y compris dans les groupes/composants)
     all_edges = collect_edges(selection)
-    puts "[Re-Cercle] Edges collectés : #{all_edges.length}"
 
     if all_edges.empty?
       UI.messagebox("Aucun edge trouvé dans la sélection.", MB_OK)
@@ -27,15 +26,11 @@ module ReCercle
 
       # --- Étape 1 : Edges libres (pas dans une curve) ---
       loose_edges = all_edges.select { |e| e.valid? && e.curve.nil? }
-      puts "[Re-Cercle] Edges libres (sans curve) : #{loose_edges.length}"
-
       circles_from_loose = find_circles_by_geometry(loose_edges)
-      puts "[Re-Cercle] Cercles détectés dans edges libres : #{circles_from_loose.length}"
 
       circles_from_loose.each do |circle_edges|
         entities_context = find_entities_context(circle_edges.first)
         if entities_context
-          puts "[Re-Cercle]   Weld de #{circle_edges.length} edges"
           entities_context.weld(circle_edges)
           circles_found += 1
         end
@@ -43,10 +38,7 @@ module ReCercle
 
       # --- Étape 2 : Edges dans des Curves fragmentées ---
       curved_edges = all_edges.select { |e| e.valid? && e.curve }
-      puts "[Re-Cercle] Edges avec curve : #{curved_edges.length}"
-
       curve_groups = group_by_circle_geometry(curved_edges)
-      puts "[Re-Cercle] Groupes de curves fragmentées : #{curve_groups.length}"
 
       curve_groups.each do |group|
         curves = group.map { |e| e.curve }.compact.uniq
@@ -56,7 +48,6 @@ module ReCercle
         if edges_form_circle?(group)
           entities_context = find_entities_context(group.first)
           if entities_context
-            puts "[Re-Cercle]   Weld curves fragmentées : #{group.length} edges"
             entities_context.weld(group)
             circles_found += 1
           end
@@ -66,7 +57,6 @@ module ReCercle
       model.commit_operation
 
       Sketchup.status_text = "Re-Cercle — #{circles_found} cercle(s) restauré(s)"
-      puts "[Re-Cercle] Terminé : #{circles_found} cercle(s) restauré(s)"
       if circles_found == 0
         UI.messagebox("Aucun cercle cassé détecté dans la sélection.", MB_OK)
       else
@@ -152,7 +142,6 @@ module ReCercle
         next if matching.length < MIN_SEGMENTS
         next unless closed_chain?(matching)
 
-        puts "[Re-Cercle]   Cercle trouvé : centre=(#{center.x.round(1)}, #{center.y.round(1)}, #{center.z.round(1)}), r=#{radius.round(2)}, #{matching.length} segments"
         matching.each { |e| processed[e.entityID] = true }
         circles << matching
         found = true
