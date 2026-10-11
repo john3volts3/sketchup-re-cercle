@@ -47,3 +47,4 @@
   - `CHANGELOG.md` — création (2.0.0 et rappel 1.0.0).
   - `FSD.md` — état de validation.
   - Syntaxe Ruby vérifiée, `build/re_cercle.rbz` reconstruit, fichiers déjà copiés dans Plugins SketchUp 2021, commit + push.
+- Release GitHub **v2.0.0** créée (2026-10-11) : tag `v2.0.0` sur `main`, `re_cercle.rbz` attaché, notes reprises du CHANGELOG.
