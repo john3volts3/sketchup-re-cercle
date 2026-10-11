@@ -1,38 +1,53 @@
-# Re-Cercle — Plugin SketchUp
+# Re-Cercle — SketchUp extension
 
-Plugin SketchUp 2021+ qui restaure les cercles cassés (suites de edges individuels) en vraies courbes (`Curve`) sélectionnables en un clic.
+[Version française](README.fr.md) · [User manual](docs/MANUAL.en.md)
 
-## Problème résolu
+Repairs **broken circles and arcs** into **true native SketchUp circles and arcs**: center
+inference, radius and segments in *Entity Info*, one-click selection.
 
-Certaines opérations SketchUp (subtract, union, retrace, import/export) cassent les associations `ArcCurve`/`Curve` des cercles. Les cercles deviennent des suites de segments indépendants — un clic ne sélectionne plus qu'un seul segment au lieu du cercle entier.
+## Problem solved
+
+Some operations (solid tools, intersections, imports, explode…) break circles: they become
+separate segments, welded curves without center inference, curves in several pieces, or segments
+split by extra vertices. Re-Cercle analyses the current geometry only — not how it was made — and
+rebuilds each circle or arc exactly where it was.
+
+## Features
+
+- Circles (6 segments or more) and arcs (3 segments or more), in any plane.
+- Select one segment, faces, or whole groups/components (explored recursively).
+- Rebuilt as **native** circles/arcs, same center, radius, segment count and vertex positions:
+  - flat circles and arcs: free circles, discs, holes in a face, rounded corners;
+  - circle crossed by a line: rebuilt as native arcs between the crossings;
+  - end circles of straight holes and pins (cylinders, truncated cones): rebuilt with a native
+    Push/Pull, both ends become native.
+- Neighbouring faces are kept with their materials (front and back), tag and orientation; holes stay
+  open.
+- When SketchUp cannot rebuild a native circle (curved surface, stacked holes such as a
+  countersink, oblique cylinder…), it is **welded** into one curve (one click selects it, but no
+  center inference) and the reason is reported.
+- One undo step per command.
+
+## Usage
+
+1. Select the broken circles/arcs: one segment of each, faces, or groups/components.
+2. Click the **Re-Cercle** toolbar button (or *Extensions > Re-Cercle > Restore Circles*).
+3. A message reports how many circles/arcs were rebuilt natively and how many were welded.
 
 ## Installation
 
-1. Dans SketchUp : **Window > Extension Manager > Install Extension**
-2. Sélectionner le fichier `build/re_cercle.rbz`
+Install `build/re_cercle.rbz` with *Window > Extension Manager > Install Extension*.
 
-## Utilisation
+## Compatibility
 
-1. Sélectionner un ou plusieurs objets (edges, groupes, composants) contenant des cercles cassés
-2. **Extensions > Re-Cercle > Restaurer les cercles** (ou bouton dans la toolbar Re-Cercle)
-3. Le plugin détecte et restaure automatiquement les cercles
-4. Opération annulable avec **Ctrl+Z**
+SketchUp 2021 tested (Windows). The weld fallback requires SketchUp 2020.1 or later.
 
-## Algorithme
+## Limitations
 
-Le plugin fonctionne en une seule passe :
+- A regular polygon with 6 sides or more cannot be told from a circle: it becomes a native circle.
+- Rebuilt faces lose their texture position and attributes (material, tag and orientation are kept).
+- Inside a component, all instances change.
 
-1. **Collecte** récursive de tous les edges (sélection, groupes, composants)
-2. **Détection par circumcircle** : pour chaque paire d'edges adjacents, calcul du cercle passant par 3 points, puis recherche de tous les edges correspondant à cette géométrie (même centre, rayon, plan)
-3. **Validation** : vérification que les edges forment une boucle fermée
-4. **Restauration** par `entities.weld()` — regroupe les edges en `Curve`
-
-Les tolérances sont adaptatives (proportionnelles au rayon) pour supporter des cercles de toutes tailles.
-
-## Compatibilité
-
-- SketchUp 2021 et versions ultérieures (utilise `entities.weld` disponible depuis SketchUp 2020.1)
-
-## Licence
+## License
 
 MIT

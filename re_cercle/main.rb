@@ -1,353 +1,117 @@
+# encoding: UTF-8
+# Re-Cercle — menu, toolbar and command.
+#
+# Broken circles and arcs found in the selection (separate segments, plain
+# welded Curves, fragmented curves, segments split by extra vertices) are
+# rebuilt as native ArcCurves: center inference, radius and segments in
+# Entity Info. When SketchUp cannot rebuild one natively, it is welded into
+# one Curve (selectable in one click, without center inference).
+
+require 'sketchup.rb'
+
 module ReCercle
+  FILES = %w[detector rebuilder volume].freeze
 
-  TOLERANCE = 0.1
-  MIN_SEGMENTS = 8
+  FILES.each { |f| Sketchup.require(File.join(PLUGIN_DIR, f)) }
 
+  # Command: restores the circles and arcs of the selection, in one
+  # undoable operation.
   def self.restore_circles
     model = Sketchup.active_model
-    selection = model.selection
-
-    if selection.empty?
-      UI.messagebox("Sélectionnez un ou plusieurs objets contenant des cercles à restaurer.", MB_OK)
+    if model.selection.empty?
+      UI.messagebox("#{PLUGIN_NAME} — Select edges, faces, groups or components " \
+                    'containing broken circles or arcs.', MB_OK)
       return
     end
 
-    # Collecter tous les edges de la sélection (y compris dans les groupes/composants)
-    all_edges = collect_edges(selection)
-
-    if all_edges.empty?
-      UI.messagebox("Aucun edge trouvé dans la sélection.", MB_OK)
-      return
-    end
-
-    model.start_operation('Re-Cercle — Restaurer les cercles', true)
-    begin
-      circles_found = 0
-
-      # --- Étape 1 : Edges libres (pas dans une curve) ---
-      loose_edges = all_edges.select { |e| e.valid? && e.curve.nil? }
-      circles_from_loose = find_circles_by_geometry(loose_edges)
-
-      circles_from_loose.each do |circle_edges|
-        entities_context = find_entities_context(circle_edges.first)
-        if entities_context
-          entities_context.weld(circle_edges)
-          circles_found += 1
+    chains = Detector.find_chains(Detector.collect_edges(model.selection))
+    result = { native: 0, welded: 0, unwelded: 0, reasons: Hash.new(0) }
+    unless chains.empty?
+      model.start_operation('Restore Circles', true)
+      begin
+        chains.each_with_index do |found, i|
+          Sketchup.status_text = "#{PLUGIN_NAME} — Circle #{i + 1}/#{chains.length}"
+          restore_chain(found, result)
         end
+        model.commit_operation
+      rescue => e
+        model.abort_operation
+        puts "[#{PLUGIN_NAME}] Error: #{e.message}"
+        puts e.backtrace.first(5).join("\n")
+        UI.messagebox("#{PLUGIN_NAME} — Error: #{e.message}", MB_OK)
+        return
       end
+    end
+    report(result)
+  end
 
-      # --- Étape 2 : Edges dans des Curves fragmentées ---
-      curved_edges = all_edges.select { |e| e.valid? && e.curve }
-      curve_groups = group_by_circle_geometry(curved_edges)
-
-      curve_groups.each do |group|
-        curves = group.map { |e| e.curve }.compact.uniq
-        next if curves.length <= 1
-
-        next if group.length < MIN_SEGMENTS
-        if edges_form_circle?(group)
-          entities_context = find_entities_context(group.first)
-          if entities_context
-            entities_context.weld(group)
-            circles_found += 1
-          end
-        end
+  # Chains are detected again just before their rebuild: rebuilding a
+  # cylinder also rebuilds its other end, and may recreate a shared face.
+  def self.restore_chain(found, result)
+    seed = found.edges.find(&:valid?)
+    return unless seed # already rebuilt with its cylinder
+    chain = Detector.chain_from(seed)
+    return unless chain
+    info = Detector.analyse(chain)
+    case info[:kind]
+    when :planar
+      Rebuilder.planar(chain, info[:pieces])
+      result[:native] += 1
+    when :volume
+      Volume.rebuild(chain.entities, info[:volume])
+      result[:native] += info[:volume].loops.length
+    when :weld
+      case Rebuilder.weld(chain)
+      when :welded
+        result[:welded] += 1
+        result[:reasons][info[:reason]] += 1
+      when :unavailable
+        result[:unwelded] += 1
       end
-
-      model.commit_operation
-
-      Sketchup.status_text = "Re-Cercle — #{circles_found} cercle(s) restauré(s)"
-      if circles_found == 0
-        UI.messagebox("Aucun cercle cassé détecté dans la sélection.", MB_OK)
-      else
-        UI.messagebox("#{circles_found} cercle(s) restauré(s) avec succès.", MB_OK)
-      end
-
-    rescue => e
-      model.abort_operation
-      UI.messagebox("Erreur Re-Cercle : #{e.message}\n#{e.backtrace.first(5).join("\n")}", MB_OK)
     end
   end
 
-  # Détecte les cercles par géométrie (circumcircle) parmi des edges libres
-  def self.find_circles_by_geometry(edges)
-    return [] if edges.empty?
-
-    # Construire l'adjacence vertex -> edges (uniquement parmi ces edges)
-    adj = {}
-    edges.each do |e|
-      [e.start, e.end].each do |v|
-        vid = v.entityID
-        adj[vid] ||= []
-        adj[vid] << e
-      end
+  def self.report(result)
+    lines = []
+    if result[:native] > 0
+      lines << "#{result[:native]} circle(s)/arc(s) rebuilt as native circles " \
+               '(center inference).'
     end
-
-    processed = {}
-    circles = []
-
-    edges.each do |edge|
-      next if processed[edge.entityID]
-
-      # Collecter TOUS les voisins aux deux extrémités
-      all_neighbors = []
-      [edge.start, edge.end].each do |vertex|
-        (adj[vertex.entityID] || []).each do |e|
-          next if e == edge || processed[e.entityID]
-          all_neighbors << { adj_edge: e, shared_vertex: vertex }
-        end
-      end
-      next if all_neighbors.empty?
-
-      # Essayer chaque voisin jusqu'à trouver un cercle valide
-      found = false
-      all_neighbors.each do |neighbor_info|
-        next if found
-        adj_edge = neighbor_info[:adj_edge]
-        shared_v = neighbor_info[:shared_vertex]
-
-        # 3 points : extrémité libre de edge, vertex partagé, extrémité libre de adj_edge
-        p2 = shared_v.position
-        p1 = (edge.start == shared_v) ? edge.end.position : edge.start.position
-        p3 = (adj_edge.start == shared_v) ? adj_edge.end.position : adj_edge.start.position
-
-        # Calculer le circumcircle
-        circle_info = compute_circumcircle(p1, p2, p3)
-        next unless circle_info
-
-        center = circle_info[:center]
-        radius = circle_info[:radius]
-        normal = circle_info[:normal]
-
-        # Tolérance adaptée au rayon (absolue pour petits cercles, relative pour grands)
-        dist_tol = [TOLERANCE, radius * 0.005].max
-
-        # Trouver tous les edges qui correspondent à ce cercle
-        matching = edges.select do |e|
-          next false if processed[e.entityID]
-          next false unless e.valid?
-          d1 = (e.start.position.distance(center) - radius).abs
-          d2 = (e.end.position.distance(center) - radius).abs
-          next false unless d1 < dist_tol && d2 < dist_tol
-          # Vérifier coplanarité avec vecteurs normalisés
-          v1 = center.vector_to(e.start.position)
-          v2 = center.vector_to(e.end.position)
-          next false if v1.length < 0.001 || v2.length < 0.001
-          v1.normalize!
-          v2.normalize!
-          next false unless v1.dot(normal).abs < 0.01 && v2.dot(normal).abs < 0.01
-          true
-        end
-
-        next if matching.length < MIN_SEGMENTS
-        next unless closed_chain?(matching)
-
-        matching.each { |e| processed[e.entityID] = true }
-        circles << matching
-        found = true
-      end
+    if result[:welded] > 0
+      why = result[:reasons].map { |reason, n| "#{reason} (#{n})" }.join(', ')
+      lines << "#{result[:welded]} welded into one curve, not native: #{why}."
     end
-
-    circles
+    if result[:unwelded] > 0
+      lines << "#{result[:unwelded]} could not be welded (SketchUp 2020.1 or later " \
+               'is required).'
+    end
+    lines << 'No broken circle or arc found in the selection.' if lines.empty?
+    msg = lines.join("\n")
+    Sketchup.status_text = "#{PLUGIN_NAME} — #{lines.join(' ')}"
+    puts "[#{PLUGIN_NAME}] #{lines.join(' ')}"
+    UI.messagebox("#{PLUGIN_NAME} — #{msg}", MB_OK)
   end
 
-  # Calcule le circumcircle de 3 points (centre, rayon, normale)
-  def self.compute_circumcircle(p1, p2, p3)
-    v1 = Geom::Vector3d.new(p2.x - p1.x, p2.y - p1.y, p2.z - p1.z)
-    v2 = Geom::Vector3d.new(p3.x - p1.x, p3.y - p1.y, p3.z - p1.z)
-
-    normal = v1.cross(v2)
-    return nil if normal.length < 0.001
-    normal.normalize!
-
-    # Milieux des segments p1-p2 et p1-p3
-    m1 = Geom::Point3d.new((p1.x + p2.x) / 2.0, (p1.y + p2.y) / 2.0, (p1.z + p2.z) / 2.0)
-    m2 = Geom::Point3d.new((p1.x + p3.x) / 2.0, (p1.y + p3.y) / 2.0, (p1.z + p3.z) / 2.0)
-
-    # Directions des médiatrices (perpendiculaires aux segments, dans le plan)
-    d1 = v1.cross(normal)
-    d2 = v2.cross(normal)
-
-    # Intersection des deux médiatrices : m1 + t*d1 = m2 + s*d2
-    delta = Geom::Vector3d.new(m2.x - m1.x, m2.y - m1.y, m2.z - m1.z)
-    d1_cross_d2 = d1.cross(d2)
-    denom = d1_cross_d2.dot(d1_cross_d2)
-    return nil if denom < 1e-10
-
-    t = delta.cross(d2).dot(d1_cross_d2) / denom
-
-    center = Geom::Point3d.new(m1.x + t * d1.x, m1.y + t * d1.y, m1.z + t * d1.z)
-    radius = center.distance(p1)
-
-    return nil if radius < 0.01
-
-    { center: center, radius: radius, normal: normal }
-  end
-
-  # Collecte récursive des edges dans la sélection
-  def self.collect_edges(entities)
-    edges = []
-    entities.each do |entity|
-      case entity
-      when Sketchup::Edge
-        edges << entity
-      when Sketchup::Group
-        edges.concat(collect_edges_from_entities(entity.entities))
-      when Sketchup::ComponentInstance
-        edges.concat(collect_edges_from_entities(entity.definition.entities))
-      when Sketchup::Face
-        entity.edges.each { |e| edges << e }
-      end
-    end
-    edges.uniq
-  end
-
-  def self.collect_edges_from_entities(entities)
-    edges = []
-    entities.grep(Sketchup::Edge) { |e| edges << e }
-    entities.grep(Sketchup::Group) { |g| edges.concat(collect_edges_from_entities(g.entities)) }
-    entities.grep(Sketchup::ComponentInstance) { |c| edges.concat(collect_edges_from_entities(c.definition.entities)) }
-    edges
-  end
-
-  # Vérifie si une chaîne est fermée (forme une boucle)
-  def self.closed_chain?(chain)
-    vertex_count = {}
-    chain.each do |edge|
-      [edge.start.entityID, edge.end.entityID].each do |vid|
-        vertex_count[vid] = (vertex_count[vid] || 0) + 1
-      end
-    end
-    vertex_count.values.all? { |c| c == 2 }
-  end
-
-  # Vérifie si un ensemble d'edges forme géométriquement un cercle
-  def self.edges_form_circle?(edges)
-    points = collect_unique_points(edges)
-    return false if points.length < MIN_SEGMENTS
-
-    n = points.length.to_f
-    cx = points.inject(0.0) { |s, p| s + p.x.to_f } / n
-    cy = points.inject(0.0) { |s, p| s + p.y.to_f } / n
-    cz = points.inject(0.0) { |s, p| s + p.z.to_f } / n
-    center = Geom::Point3d.new(cx, cy, cz)
-
-    dists = points.map { |p| p.distance(center).to_f }
-    avg_r = dists.inject(0.0, :+) / dists.length
-    return false if avg_r < 0.01
-
-    max_dev = dists.map { |d| (d - avg_r).abs }.max
-    dist_tol = [TOLERANCE, avg_r * 0.005].max
-    return false unless max_dev < dist_tol
-
-    return false unless points_coplanar?(points, center)
-    true
-  end
-
-  def self.points_coplanar?(points, center)
-    return true if points.length < 4
-
-    v1 = center.vector_to(points[0])
-    quarter = points.length / 4
-    v2 = center.vector_to(points[quarter])
-
-    normal = v1.cross(v2)
-    return false if normal.length < 0.001
-    normal.normalize!
-
-    points.all? do |p|
-      vec = center.vector_to(p)
-      len = vec.length
-      next true if len < 0.001
-      (vec.dot(normal) / len).abs < 0.01
-    end
-  end
-
-  def self.collect_unique_points(edges)
-    seen = {}
-    points = []
-    edges.each do |edge|
-      [edge.start, edge.end].each do |vertex|
-        vid = vertex.entityID
-        unless seen[vid]
-          seen[vid] = true
-          points << vertex.position
-        end
-      end
-    end
-    points
-  end
-
-  # Groupe les edges courbés par géométrie de cercle similaire
-  def self.group_by_circle_geometry(edges)
-    return [] if edges.empty?
-
-    by_curve = {}
-    edges.each do |e|
-      next unless e.valid? && e.curve
-      cid = e.curve.entityID
-      by_curve[cid] ||= { edges: [], center: nil, radius: nil, normal: nil }
-      by_curve[cid][:edges] << e
-    end
-
-    by_curve.each_value do |info|
-      points = collect_unique_points(info[:edges])
-      next if points.length < 3
-      n = points.length.to_f
-      cx = points.inject(0.0) { |s, p| s + p.x.to_f } / n
-      cy = points.inject(0.0) { |s, p| s + p.y.to_f } / n
-      cz = points.inject(0.0) { |s, p| s + p.z.to_f } / n
-      info[:center] = Geom::Point3d.new(cx, cy, cz)
-
-      dists = points.map { |p| p.distance(info[:center]).to_f }
-      info[:radius] = dists.inject(0.0, :+) / dists.length
-
-      v1 = info[:center].vector_to(points[0])
-      quarter = [points.length / 4, 1].max
-      v2 = info[:center].vector_to(points[quarter])
-      normal = v1.cross(v2)
-      info[:normal] = normal.length > 0.001 ? normal.normalize! : nil
-    end
-
-    groups = []
-    curve_infos = by_curve.values.select { |info| info[:center] && info[:normal] }
-    used = {}
-
-    curve_infos.each_with_index do |info_a, i|
-      next if used[i]
-      group = info_a[:edges].dup
-      used[i] = true
-
-      curve_infos.each_with_index do |info_b, j|
-        next if used[j]
-        next unless info_a[:center].distance(info_b[:center]) < TOLERANCE
-        next unless (info_a[:radius] - info_b[:radius]).abs < TOLERANCE
-        dot = info_a[:normal].dot(info_b[:normal]).abs
-        next unless dot > 0.99
-        group.concat(info_b[:edges])
-        used[j] = true
-      end
-
-      groups << group if group.length >= MIN_SEGMENTS
-    end
-
-    groups
-  end
-
-  def self.find_entities_context(edge)
-    return nil unless edge.valid?
-    edge.parent.entities
+  # Development reload: ReCercle.reload
+  def self.reload
+    verbose = $VERBOSE
+    $VERBOSE = nil
+    (FILES + ['main']).each { |f| load File.join(PLUGIN_DIR, "#{f}.rb") }
+    puts "[#{PLUGIN_NAME}] Reloaded (#{FILES.size + 1} files)"
+  ensure
+    $VERBOSE = verbose
   end
 
   # --- Menu et Toolbar ---
   unless @loaded
-    menu = UI.menu('Extensions').add_submenu('Re-Cercle')
-    menu.add_item('Restaurer les cercles') { self.restore_circles }
+    menu = UI.menu('Extensions').add_submenu(PLUGIN_NAME)
+    menu.add_item('Restore Circles') { self.restore_circles }
 
-    toolbar = UI::Toolbar.new('Re-Cercle')
-    cmd = UI::Command.new('Restaurer les cercles') { self.restore_circles }
-    cmd.tooltip = 'Restaurer les cercles cassés'
-    cmd.status_bar_text = 'Restaure les cercles cassés en vraies courbes sélectionnables en un clic'
+    toolbar = UI::Toolbar.new(PLUGIN_NAME)
+    cmd = UI::Command.new('Restore Circles') { self.restore_circles }
+    cmd.tooltip = 'Restore broken circles and arcs'
+    cmd.status_bar_text = 'Rebuilds broken circles and arcs of the selection as native ' \
+                          'circles (center inference)'
 
     icon_path = File.join(File.dirname(__FILE__), 'icons')
     small_icon = File.join(icon_path, 're_cercle_16.png')
@@ -358,6 +122,7 @@ module ReCercle
     toolbar.add_item(cmd)
     toolbar.show
 
+    puts "[#{PLUGIN_NAME}] v#{VERSION} loaded"
     @loaded = true
   end
 
